@@ -1,0 +1,823 @@
+---
+title: 'DATS6101 Group Project: NYC Poverty'
+author: "Isaac Amoah, Evan Carraway, Victor Chen, Weining Hu, and Tina Nguyen"
+date: "December 5, 2018"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 2
+    toc_float: yes
+    code_folding: hide
+  powerpoint_presentation:
+    reference_doc: template.potx
+    toc: no
+always_allow_html: yes
+autosize: True
+---
+
+```{r set-options, echo = FALSE, cache = FALSE}
+options(width = 120)
+```
+
+```{r, echo = FALSE, message = FALSE}
+#install and load required packages
+all_packages <- c(
+  "webshot",
+  "rmarkdown",
+  "scales",
+  "mime",
+  "rgdal",
+  "rmapshaper",
+  "ggplot2",
+  "plyr",
+  "dplyr",
+  "leaflet",
+  "knitr",
+  "plotly",
+  "bestglm",
+  "leaps",
+  "ggplot2",
+  "ResourceSelection",
+  "pROC",
+  "pscl",
+  "aod",
+  "corrplot",
+  "FNN",
+  "class",
+  "gmodels",
+  "cluster",
+  "fpc",
+  "DT",
+  "randomForest",
+  "caret"
+  )
+
+for (i in all_packages) {
+  if (!require(i, character.only = TRUE)) {
+    install.packages(i, character.only = TRUE)
+    }
+}
+for (i in all_packages) {
+  library(i, character.only = TRUE)
+}
+```
+![](NYC.jpg)
+
+# Chapter 1: Introduction
+
+Poverty is one of the topics that has been researched by a lot of economists and data scientist. It is one of the economic problems most countries want to alleviate. As one of the countries that have the strongest economy, the U.S. also faces challenges in domestic poverty. Based on the latest Income and Poverty in the United State report by US Census Bureau, the poverty rate in 2017 was 12.3 percent, 0.4 percent down from the previous year (Fontenot, Semega, Kollar, 2018). This project will focus on the poverty rate in New York City, since it is one of the most iconic/representative cities in the United States, also with the highest levels of income inequality in the country (Abadi, 2018). This study will use logistic regression model, random forest and other techniques on the poverty status in New York; finding the indicators that can make the best prediction using feature selection to help determine what social/economic issues relate to poverty. It will start with some basic EDA and follow with the evaluation of the prediction model.
+
+# Chapter 2: Description of Data
+## 2.1 Source Data
+
+```{r, message = FALSE}
+#load data
+pov <- read.csv("NYCgov_Poverty_2016.csv")
+```
+The data we examined contains poverty rates and related data from the NYCgov poverty measure data. The NYCgov poverty measure is generated annually by the poverty research unit of the Mayor's Office of Economic Opportunity (NYC Opportunity). The data is derived from the American Community Survey Public Use Microsample for NYC, augmented by NYC Opportunity to include imputed estimates for benefit participation and some household expenditures. The number of observations for this data set is  <b>`r format(nrow(pov), big.mark = ",")`</b> with  <b>`r format(ncol(pov))`</b> unique variables. For information on how the NYCgov poverty rate is constructed see http://www1.nyc.gov/site/opportunity/poverty-in-nyc/poverty-measure.page.
+
+```{r, message = FALSE}
+keep <- c("PWGTP", "WGTP", "PreTaxIncome_PU", "SERIALNO",
+          "SEX", "ESR", "LANX", "MAR", "DIS", "NP", "TEN",
+          "Boro", "Povunit_Rel", "FamType_PU", "HousingStatus",
+          "Ethnicity", "EducAttain", "CitizenStatus",
+          "AgeCateg", "FTPTWork", "NYCgov_Pov_Stat", "Off_Pov_Stat")
+df <- pov[, keep]
+#convert to categorical
+df$Off_Pov_Stat <- ifelse(df$Off_Pov_Stat == "2", 0, 1)
+df$NYCgov_Pov_Stat <- ifelse(df$NYCgov_Pov_Stat == "2", 0, 1)
+cols <- c(2:19)
+df[, cols] <- lapply(df[, cols], factor)
+df$NP <- as.integer(df$NP)
+#check for missing values in every column
+#missing values are in columns ESR, LANX, EducAttain
+#impute missing values in each column with the mode of each SERIALNO
+#if there is only one person then drop it
+mode <- function(x) {
+    ux <- unique(x)
+    ux[which.max(tabulate(match(x, ux)))]
+}
+df <- df %>%
+  group_by(SERIALNO) %>%
+  mutate(ESR = ifelse(is.na(ESR), mode(ESR), ESR),
+         LANX = ifelse(is.na(LANX), mode(LANX), LANX),
+         EducAttain = ifelse(is.na(EducAttain), mode(EducAttain), EducAttain))
+#able to impute a good amount of missing values, drop the remaining NaN
+df <- na.omit(df)
+df <- as.data.frame(df)
+```
+## 2.2 Source Data (Continued)
+
+Borough spatial data obtained from NYC Department of City Planning (DCP). Created: Jan 29, 2013. Updated: Sep 17, 2018. Downloaded: Nov 18, 2018.
+https://data.cityofnewyork.us/City-Government/Borough-Boundaries/tqmj-j8zm
+```{r, message = FALSE}
+boroughs <- readOGR("borough.shp", verbose = FALSE)
+```
+## 2.3 Interactivity Note
+
+The document below contains interactive charts and elements. Maps can be zoomed in on and layers changed. Charts can be zoomed and filtered/tagged, and tables can be sorted. Most of these features were created using [Plotly](https://plot.ly/r/), [DataTables](https://rstudio.github.io/DT/) and [Leaflet](https://rstudio.github.io/leaflet/). In addition the table of contents on the left is interactive as well and code blocks for each section can be viewed by clicking on the code buttons on the right.
+
+# Chapter 3: Analysis of Boroughs
+## 3.1 SMART Question
+#### Are socioeconomic conditions the same across the five boroughs? Which borough has the highest or lowest poverty percentages?
+
+## 3.2 Income Distribution by Borough
+
+```{r, message = FALSE}
+dfb <- df
+dfb$boro_name[dfb$Boro == 1] <- "Bronx"
+dfb$boro_name[dfb$Boro == 2] <- "Brooklyn"
+dfb$boro_name[dfb$Boro == 3] <- "Manhattan"
+dfb$boro_name[dfb$Boro == 4] <- "Queens"
+dfb$boro_name[dfb$Boro == 5] <- "Staten Island"
+dfb$NYCgov_Pov_Stat <- as.numeric(dfb$NYCgov_Pov_Stat)
+dfb$Off_Pov_Stat <- as.numeric(dfb$Off_Pov_Stat)
+dfb$PreTaxIncome_PU <- as.numeric(as.character(dfb$PreTaxIncome_PU))
+boroughpoverty <- setNames(aggregate(. ~ dfb$boro_name, dfb["NYCgov_Pov_Stat"] * dfb["PWGTP"], sum), c("boro_name", "total_poverty"))
+boroughcounts <- setNames(aggregate(. ~ dfb$boro_name, dfb["PWGTP"], sum), c("boro_name", "total_pop"))
+boroughall <- merge(boroughpoverty, boroughcounts)
+boroughall$poverty_rate <- round(boroughall$total_poverty / boroughall$total_pop * 100, 2)
+boroughall <- arrange(boroughall, desc(poverty_rate))
+boroughs2 <- merge(x = boroughs, y = boroughall, all.x = TRUE)
+boroughs2$popsqm <- boroughs2$total_pop / (boroughs2$shape_area / 27878400)
+boroughs2$povsqm <- boroughs2$total_poverty / (boroughs2$shape_area / 27878400)
+dfb_exp <- dfb[rep(row.names(dfb), ceiling(dfb$PWGTP / 200)), ]
+dfb2 <- dfb_exp[-which(dfb_exp$PreTaxIncome_PU %in% boxplot(dfb_exp$PreTaxIncome_PU, plot = FALSE)$out), ]
+boroughmedian <- setNames(aggregate(. ~ dfb2$boro_name, dfb2["PreTaxIncome_PU"], median), c("boro_name", "median_income"))
+boroughmedian <- arrange(boroughmedian, desc(median_income))
+```
+
+While overall poverty in NYC is consistent with other metropolitan areas, there is a wide disparity between income in the five boroughs. The <b>`r format(boroughmedian[1, 1])`</b> borough has the highest median income of <b>\$`r format(boroughmedian[1, 2], big.mark = ",")`</b>. On the other end, the <b>`r format(boroughmedian[5, 1])`</b> borough has the lowest median income of only <b>\$`r format(boroughmedian[5, 2], big.mark = ",")`</b>.
+
+```{r, message = FALSE}
+a <- list(
+  autotick = TRUE,
+  title = "Pre-tax Income",
+  showticklabels = TRUE
+)
+p <- plot_ly(dfb2, y = ~PreTaxIncome_PU, color = ~boro_name, type = "box", width = 800, height = 500) %>%
+  layout(yaxis = a, title = "<b>Income Distribution by Borough</b>")
+p
+```
+While there is income disparity across the boroughs, there is even more disparity within each borough, between the bulk of the population and high earners. For the purposes of our analysis, we dropped some outliers, but there is still a significant amount even in a sample set of the population. This is consistent with the fact that NYC and New York more broadly has the highest income inequality in the country. The top 1 percent earned 45 times more than the bottom 99 percent in New York State while the average income of the top 1% was 116 times that of the 99% in Manhattan (FPI, 2016).
+
+## 3.3 Highest Poverty Rate by Borough
+
+In addition to income, there is a wide disparity between poverty in the five boroughs. The <b>`r format(boroughall[1, 1])`</b> borough has the highest poverty rate with <b>`r format(boroughall[1, 4])`%</b> of residents living at or below the poverty line. On the other end, the <b>`r format(boroughall[5, 1])`</b> borough has the lowest poverty rate with only <b>`r format(boroughall[5, 4])`%</b> of residents living at or below the poverty line.
+
+```{r, echo = F, message = FALSE}
+boroughs3 <- data.frame(boroughs2[, c("boro_name", "poverty_rate", "total_poverty", "total_pop")])
+boroughs3 <- arrange(boroughs3, desc(poverty_rate))
+boroughs3$poverty_rate <- boroughs3$poverty_rate / 100.0
+datatable(boroughs3, rownames = FALSE, colnames = c("Borough Name", "Poverty Rate", "Population in Poverty", "Total Population"), options = list(
+  pageLength = 5,
+  dom = "t",
+  searching = FALSE
+)) %>%
+  formatStyle(
+    "poverty_rate",
+    background = styleColorBar(range(boroughs3$poverty_rate, min(boroughs3$poverty_rate) / 2), "steelblue"),
+    backgroundSize = "80%",
+    backgroundRepeat = "no-repeat",
+    backgroundPosition = "right"
+  ) %>%
+  formatStyle(
+    "total_poverty",
+    background = styleColorBar(range(boroughs3$total_poverty, min(boroughs3$total_poverty) / 2), "steelblue"),
+    backgroundSize = "80%",
+    backgroundRepeat = "no-repeat",
+    backgroundPosition = "right"
+  ) %>%
+  formatStyle(
+    "total_pop",
+    background = styleColorBar(range(boroughs3$total_pop, min(boroughs3$total_pop) / 2), "steelblue"),
+    backgroundSize = "80%",
+    backgroundRepeat = "no-repeat",
+    backgroundPosition = "right"
+  ) %>%
+  formatPercentage("poverty_rate", 1) %>%
+  formatCurrency("total_poverty", currency = "", interval = 3, mark = ", ",
+    digits = 0) %>%
+  formatCurrency("total_pop", currency = "", interval = 3, mark = ", ",
+    digits = 0)
+```
+
+## 3.4 Visualization of Borough Metrics on Map
+
+While some insights can be derived with bar charts of boroughs, it is easier to visualize differences in boroughs geospatially. To visualize which boroughs have the highest/lowest poverty rates, we need to aggregate our poverty values by borough and then join that data to our borough spatial data referenced earlier. In addition to our analysis of high/low poverty rates, we will create layers for population density and individuals below poverty line per square mile. The below visualization shows poverty percentage in each borough, and can be interacted with to show poverty density or total population density per borough through the layer controls. The visualization was created using the leaflet library.
+```{r, message = FALSE}
+col_pal3 <- colorNumeric("RdYlGn", domain = -log(boroughs2$poverty_rate))
+col_pal4 <- colorNumeric("RdYlGn", domain = -log(boroughs2$povsqm))
+col_pal5 <- colorNumeric("RdYlGn", domain = -log(boroughs2$popsqm))
+leaflet(width = "100%") %>%
+  addProviderTiles(providers$CartoDB.Positron, group = "Base")  %>%
+  addPolygons(data = boroughs2, color = "black", weight = 1, smoothFactor = 0.33,
+    opacity = 1.0, fillOpacity = 0.33,
+    label = ~paste0("borough name: ", boro_name, ", poverty rate ", poverty_rate, "%, based on ", round(total_pop / 1000000, 2), "m total residents"),
+    fillColor = ~col_pal3(-log(poverty_rate)),
+    highlightOptions = highlightOptions(color = "white", weight = 2,
+      bringToFront = TRUE), group = "poverty rate by borough") %>%
+  addPolygons(data = boroughs2, color = "black", weight = 1, smoothFactor = 0.33,
+    opacity = 1.0, fillOpacity = 0.33,
+    label = ~paste0("borough: ", boro_name, ", poverty density: ", round(povsqm / 1000, 2), "k / sq. mi based on ", round(total_poverty / 1000, 2), "k individuals in poverty"),
+    fillColor = ~col_pal4(-log(povsqm)),
+    highlightOptions = highlightOptions(color = "white", weight = 2,
+      bringToFront = TRUE), group = "poverty density by borough")   %>%
+  addPolygons(data = boroughs2, color = "black", weight = 1, smoothFactor = 0.5,
+    opacity = 1.0, fillOpacity = 0.33,
+    label = ~paste0("borough: ", boro_name, ", total population: ", round(popsqm / 1000, 2), "k / sq. mi based on ", round(total_pop / 1000000, 2), "m total residents"),
+    fillColor = ~col_pal5(-log(popsqm)),
+    highlightOptions = highlightOptions(color = "white", weight = 2,
+      bringToFront = TRUE), group = "population density by borough") %>%
+  addLayersControl(
+    overlayGroups = c("poverty rate by borough", "poverty density by borough", "population density by borough"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  hideGroup(c("poverty density by borough", "population density by borough"))
+```
+
+# Chapter 4: Ethnicity Groups Review
+Equality among ethnic groups has been increasing in the U.S. over the past decades but still remains a significant issue which relates directly to poverty. As of 2015, African Americans earned 75% as much as White Americans, translating to roughly 14 dollars per hour versus 21 dollars per hour in the case of men (Patten, 2016). As income is expected to be the largest factor in identify/assessing poverty, ethnicity should also be looked at when examining this issue. As poverty is a social issue, this is a specific instance where it is appropriate to consider race when modeling factors related to poverty, with the caveat that ethnicity's relation to poverty is due to long-standing racial equality challenges in the U.S. and other countries.
+
+## 4.1 SMART Question
+#### Is poverty distribution the same across different ethnicity groups? Which ethnicity group has the highest or lowest poverty percentages?
+
+## 4.2 Basic Analysis of Different Ethnic Groups.
+
+```{r, message = FALSE}
+Ethnicity <- table(df$Ethnicity)
+Ethnicity_rate <- Ethnicity / sum(Ethnicity)
+```
+By grouping the dataframe by ethnicity, we can observe that the population distribution of different ethnic groups. The largest ethnic group in our sample is non-Hispanic white individual group (<b>`r format(round(Ethnicity_rate[1] * 100, 2))`%</b>), followed by Hispanic individual group (<b>`r format(round(Ethnicity_rate[4] * 100, 2))`%</b>), non-Hispanic black individual group (<b>`r format(round(Ethnicity_rate[2] * 100, 2))`%</b>), non-Hispanic Asian individual group (<b>`r format(round(Ethnicity_rate[3] * 100, 2))`%</b>), and lastly other race group (<b>`r format(round(Ethnicity_rate[5] * 100, 2))`%</b>).
+
+## 4.3 Comparing Poverty Rates across Different Ethnic Groups
+
+By sub-setting the dataframe based on ethnicity and poverty conditions, the results show Hispanic group has highest poverty ratio among all ethnic groups in New York city. The white individual group has the second highest poverty rate, followed by the Asian group and the Black individual group. The following bar plots is ordered by poverty ratio of each ethnic group in New York city.
+```{r, message = FALSE}
+#Select observations
+Freq1_0 <- length(df$Ethnicity[df$Ethnicity == "1" & df$NYCgov_Pov_Stat == "0"])
+Freq1_1 <- length(df$Ethnicity[df$Ethnicity == "1" & df$NYCgov_Pov_Stat == "1"])
+Freq2_0 <- length(df$Ethnicity[df$Ethnicity == "2" & df$NYCgov_Pov_Stat == "0"])
+Freq2_1 <- length(df$Ethnicity[df$Ethnicity == "2" & df$NYCgov_Pov_Stat == "1"])
+Freq3_0 <- length(df$Ethnicity[df$Ethnicity == "3" & df$NYCgov_Pov_Stat == "0"])
+Freq3_1 <- length(df$Ethnicity[df$Ethnicity == "3" & df$NYCgov_Pov_Stat == "1"])
+Freq4_0 <- length(df$Ethnicity[df$Ethnicity == "4" & df$NYCgov_Pov_Stat == "0"])
+Freq4_1 <- length(df$Ethnicity[df$Ethnicity == "4" & df$NYCgov_Pov_Stat == "1"])
+Freq5_0 <- length(df$Ethnicity[df$Ethnicity == "5" & df$NYCgov_Pov_Stat == "0"])
+Freq5_1 <- length(df$Ethnicity[df$Ethnicity == "5" & df$NYCgov_Pov_Stat == "1"])
+#Create a dataframe for barplot
+EthnicityTable <- matrix(c(Freq1_0, Freq1_1, 1, Freq2_0, Freq2_1, 2, Freq3_0, Freq3_1, 3, Freq4_0, Freq4_1, 4, Freq5_0, Freq5_1, 5 ), ncol = 3, byrow = TRUE)
+colnames(EthnicityTable) <- c("Non-poverty", "Poverty", "Ethnicity")
+rownames(EthnicityTable) <- c("White", "Black", "Asian", "Hispanic", "Other")
+EthnicityTable <- as.data.frame(EthnicityTable)
+EthnicityTable["Non-poverty %"] <- round(EthnicityTable$"Non-poverty" / (EthnicityTable$"Non-poverty" + EthnicityTable$"Poverty") * 100, 2)
+EthnicityTable["Poverty %"] <- round(EthnicityTable$"Poverty" / (EthnicityTable$"Non-poverty" + EthnicityTable$"Poverty") * 100, 2)
+EthnicityTable_sort <- EthnicityTable[order(-EthnicityTable$Poverty), ]
+edt <- data.frame(EthnicityTable_sort[, c("Non-poverty", "Poverty", "Non-poverty %", "Poverty %")])
+colnames(edt) <- c("Non-poverty", "Poverty", "Non-poverty %", "Poverty %")
+edt$"Non-poverty %" <- edt$"Non-poverty %" / 100.0
+edt$"Poverty %" <- edt$"Poverty %" / 100.0
+datatable(edt, options = list(
+  pageLength = 5,
+  dom = "t",
+  searching = FALSE
+)) %>%
+  formatStyle(
+    "Non-poverty",
+    background = styleColorBar(range(edt$"Non-poverty", min(edt$"Non-poverty") / 2), "steelblue"),
+    backgroundSize = "80%",
+    backgroundRepeat = "no-repeat",
+    backgroundPosition = "right"
+  ) %>%
+  formatStyle(
+    "Poverty",
+    background = styleColorBar(range(edt$Poverty, min(edt$Poverty) / 2), "steelblue"),
+    backgroundSize = "80%",
+    backgroundRepeat = "no-repeat",
+    backgroundPosition = "right"
+  ) %>%
+  formatStyle(
+    "Non-poverty %",
+    background = styleColorBar(range(edt$"Non-poverty %", min(edt$"Non-poverty %") / 2), "steelblue"),
+    backgroundSize = "80%",
+    backgroundRepeat = "no-repeat",
+    backgroundPosition = "right"
+  ) %>%
+  formatStyle(
+    "Poverty %",
+    background = styleColorBar(range(edt$"Poverty %", min(edt$"Poverty %") / 2), "steelblue"),
+    backgroundSize = "80%",
+    backgroundRepeat = "no-repeat",
+    backgroundPosition = "right"
+  ) %>%
+  formatPercentage("Non-poverty %", 1) %>%
+  formatPercentage("Poverty %", 1) %>%
+  formatCurrency("Non-poverty", currency = "", interval = 3, mark = ", ",
+    digits = 0) %>%
+  formatCurrency("Poverty", currency = "", interval = 3, mark = ", ",
+    digits = 0)
+
+plot_table <- t(EthnicityTable_sort[c("Non-poverty", "Poverty")])
+t <- list(
+  size = 12,
+  color = "black")
+p <- plot_ly(data.frame(plot_table),
+            width = 750,
+            height = 500,
+            x = ~colnames(plot_table),
+            y = ~plot_table["Non-poverty", ],
+            text = ~paste0(round(100 * plot_table["Non-poverty", ] / (plot_table["Poverty", ] + plot_table["Non-poverty", ]), 1), "%"),
+            textposition = "auto",
+            marker = list(
+              color = "rgb(55, 100, 158)",
+              line = list(
+                color = "rgb(0, 0, 0)",
+                width = 1.5)
+            ),
+            opacity = 0.75,
+            type = "bar",
+            name = "Non-poverty") %>%
+  add_trace(y = ~plot_table["Poverty", ],
+            name = "Poverty",
+            text = ~paste0(round(100 * plot_table["Poverty", ] / (plot_table["Poverty", ] + plot_table["Non-poverty", ]), 1), "%"),
+            marker = list(
+              color = "rgb(158, 55, 55)",
+              line = list(
+                color = "rgb(0, 0, 0)",
+                width = 1.5)
+            )) %>%
+  layout(yaxis = list(title = "Count"), xaxis = list(title = "Race"), barmode = "stack", title = "Poverty Distribution by Ethnicity Groups", font = t, margin = list(t = 30))
+p
+```
+
+# Chapter 5: Education Attainment
+
+Poverty and educational attainment are two areas that are closely related. Conventional thinking suggests higher educational obtainment reduces poverty as individuals qualify for more jobs and can earn higher wages. At the same time though, poverty itself can impact educational obtainment as low-income families and their children are often already behind their more affluent peers (Ferguson, 2007).
+
+## 5.1 SMART Question
+#### Is poverty distribution the same across different groups of educational level? Does it correspond with our conventional thinking? Which educational attainment group has the highest or lowest poverty percentages?
+
+## 5.2 Basic Analysis of the Educational Attainment within the Sample
+Education has a relationship with poverty, there is an inverse relationship between the level of education and poverty. An individual with less than a high school education is nearly more likely to be in poverty than someone with a bachelor's or more.
+
+```{r, message = FALSE}
+EducAttain <- table(df$EducAttain)
+#EducAttain refers to education attainment
+EducAttain_rate <- round(EducAttain / sum(EducAttain) * 100, 2)
+df_EducAttain_rate <- as.data.frame(EducAttain_rate)
+df_EducAttain_rate["Educational Attainment"] <- c("Less than High School", "High School Degree", "Some College", "Bachelors Degree or Higher")
+```
+Basic analysis show <b>`r format(round(df_EducAttain_rate[4, "Freq"], 2))`%</b> of the sample obtained `r format(df_EducAttain_rate[4, "Educational Attainment"])`. <b>`r format(round(df_EducAttain_rate[3, "Freq"], 2))`%</b> of the sample received `r format(df_EducAttain_rate[3, "Educational Attainment"])`. <b>`r format(round(df_EducAttain_rate[2, "Freq"], 2))`%</b> of the sample received `r format(df_EducAttain_rate[2, "Educational Attainment"])`, while <b>`r format(round(df_EducAttain_rate[1, "Freq"], 2))`%</b> received `r format(df_EducAttain_rate[1, "Educational Attainment"])`.
+```{r, message = FALSE}
+#Pie chart
+slices <- df_EducAttain_rate$Freq
+lbls <- df_EducAttain_rate$`Educational Attainment`
+pct <- round(slices / sum(slices) * 100)
+lbls <- paste(lbls, pct)
+lbls <- paste(lbls, "%", sep = "")
+p <- plot_ly(df_EducAttain_rate,
+             labels = ~df_EducAttain_rate$`Educational Attainment`,
+             values = ~df_EducAttain_rate$Freq, type = "pie",
+             textposition = "inside",
+             textinfo = "label+percent",
+             insidetextfont = list(color = "#FFFFFF"),
+             hoverinfo = "text",
+             text = ~lbls,
+             opacity = 0.6,
+             marker = list(colors = ~df_EducAttain_rate$`Educational Attainment`,
+                           line = list(color = "#FFFFFF", width = 2)),
+                           #The "pull" attribute can also be used to create space between the sectors
+             showlegend = FALSE) %>%
+  layout(title = "<b>Pie Chart of Educational Attainment</b>",
+         xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+         yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+p
+```
+
+## 5.3 Comparing Poverty Rates across Different Educational Attainment Groups
+
+By sub-setting the dataframe based on education and poverty conditions, the results show less than high school group has highest poverty ratio among all groups in New York city. The bachelors or higher individual group has the lowest poverty rate. The following bar plot is ordered by poverty ratio of each education group in New York city.
+```{r, message = FALSE}
+#Select observations
+freq1_0 <- length(df$EducAttain[df$EducAttain == "1" & df$NYCgov_Pov_Stat == "0"])
+freq1_1 <- length(df$EducAttain[df$EducAttain == "1" & df$NYCgov_Pov_Stat == "1"])
+freq2_0 <- length(df$EducAttain[df$EducAttain == "2" & df$NYCgov_Pov_Stat == "0"])
+freq2_1 <- length(df$EducAttain[df$EducAttain == "2" & df$NYCgov_Pov_Stat == "1"])
+freq3_0 <- length(df$EducAttain[df$EducAttain == "3" & df$NYCgov_Pov_Stat == "0"])
+freq3_1 <- length(df$EducAttain[df$EducAttain == "3" & df$NYCgov_Pov_Stat == "1"])
+freq4_0 <- length(df$EducAttain[df$EducAttain == "4" & df$NYCgov_Pov_Stat == "0"])
+freq4_1 <- length(df$EducAttain[df$EducAttain == "4" & df$NYCgov_Pov_Stat == "1"])
+#Create a dataframe for barplot
+EducAttainTable <- matrix(c(freq1_0, freq1_1, 1, freq2_0, freq2_1, 2, freq3_0, freq3_1, 3, freq4_0, freq4_1, 4), ncol = 3, byrow = TRUE)
+colnames(EducAttainTable) <- c("Non-poverty", "Poverty", "Educational Attainment")
+rownames(EducAttainTable) <- c("Less Than High School", "High School", "Some College", "Bachelors or higher")
+EducAttainTable <- as.data.frame(EducAttainTable)
+EducAttainTable["Non-poverty %"] <- round(EducAttainTable$"Non-poverty" / (EducAttainTable$"Non-poverty" + EducAttainTable$"Poverty") * 100, 2)
+EducAttainTable["Poverty %"] <- round(EducAttainTable$"Poverty" / (EducAttainTable$"Non-poverty" + EducAttainTable$"Poverty") * 100, 2)
+EducAttainTable_sort <- EducAttainTable[order(-EducAttainTable$Poverty), ]
+edt <- EducAttainTable_sort[, c("Non-poverty", "Poverty", "Non-poverty %", "Poverty %")]
+colnames(edt) <- c("Non-poverty", "Poverty", "Non-poverty %", "Poverty %")
+edt$"Non-poverty %" <- edt$"Non-poverty %" / 100.0
+edt$"Poverty %" <- edt$"Poverty %" / 100.0
+datatable(edt, options = list(
+  pageLength = 5,
+  dom = "t",
+  searching = FALSE
+)) %>%
+  formatStyle(
+    "Non-poverty",
+    background = styleColorBar(range(edt$"Non-poverty", min(edt$"Non-poverty") / 2), "steelblue"),
+    backgroundSize = "80%",
+    backgroundRepeat = "no-repeat",
+    backgroundPosition = "right"
+  ) %>%
+  formatStyle(
+    "Poverty",
+    background = styleColorBar(range(edt$Poverty, min(edt$Poverty) / 2), "steelblue"),
+    backgroundSize = "80%",
+    backgroundRepeat = "no-repeat",
+    backgroundPosition = "right"
+  ) %>%
+  formatStyle(
+    "Non-poverty %",
+    background = styleColorBar(range(edt$"Non-poverty %", min(edt$"Non-poverty %") / 2), "steelblue"),
+    backgroundSize = "80%",
+    backgroundRepeat = "no-repeat",
+    backgroundPosition = "right"
+  ) %>%
+  formatStyle(
+    "Poverty %",
+    background = styleColorBar(range(edt$"Poverty %", min(edt$"Poverty %") / 2), "steelblue"),
+    backgroundSize = "80%",
+    backgroundRepeat = "no-repeat",
+    backgroundPosition = "right"
+  ) %>%
+  formatPercentage("Non-poverty %", 1) %>%
+  formatPercentage("Poverty %", 1) %>%
+  formatCurrency("Non-poverty", currency = "", interval = 3, mark = ", ",
+    digits = 0) %>%
+  formatCurrency("Poverty", currency = "", interval = 3, mark = ", ",
+    digits = 0)
+```
+
+```{r, message = FALSE}
+plot_EduTable <- t(EducAttainTable_sort[c("Non-poverty", "Poverty")])
+t <- list(
+  size = 12,
+  color = "black")
+p <- plot_ly(data.frame(plot_EduTable),
+            width = 750,
+            height = 500,
+            x = ~colnames(plot_EduTable),
+            y = ~plot_EduTable["Non-poverty", ],
+            text = ~paste0(round(100 * plot_EduTable["Non-poverty", ] / (plot_EduTable["Poverty", ] + plot_EduTable["Non-poverty", ]), 1), "%"),
+            textposition = "auto",
+            marker = list(
+              color = "rgb(55, 100, 158)",
+              line = list(
+                color = "rgb(0, 0, 0)",
+                width = 1.5)
+            ),
+            opacity = 0.75,
+            type = "bar",
+            name = "Non-poverty") %>%
+  add_trace(y = ~plot_EduTable["Poverty", ],
+            name = "Poverty",
+            text = ~paste0(round(100 * plot_EduTable["Poverty", ] / (plot_EduTable["Poverty", ] + plot_EduTable["Non-poverty", ]), 1), "%"),
+            marker = list(
+              color = "rgb(158, 55, 55)",
+              line = list(
+                color = "rgb(0, 0, 0)",
+                width = 1.5)
+            )) %>%
+  layout(yaxis = list(title = "Count"), xaxis = list(title = "Education"), barmode = "group", title = "Poverty Distribution by Education Attainment", font = t, margin = list(t = 30))
+p
+```
+
+# Chapter 6: Predicting Poverty
+
+Based on our analysis, we will build a model to predict risk of falling into poverty by examining and validating which variables put individuals most at risk. We've done our initial EDA to look at some obvious variables individually, but to better understand relationships with poverty we will assess all our variables using different techniques.
+
+There are two reasons to build a model to predict poverty, one being that this is a good way for governments and NGOs to come up with policies and strategies that will help target the right factors behind poverty. In addition, if you can predict status better, you could target interventions for individuals through early childhood to decluster the different disadvantages/inequalities like housing/education (Reeves, 2016). Our data only contains a year, and a study of factors for childhood poverty intervention would require more analysis over time as a time series problem. This would be a good area for future study.
+
+## 6.1 SMART Question
+#### What are the risk factors and predictors of poverty?
+
+## 6.2 Modeling Poverty Risk Factors
+
+To determine what factors correlate to each other, we can create a heat map of correlations and carry out feature selection to identify factors that predict poverty status.
+
+```{r, message = FALSE}
+keep2 <- c("PreTaxIncome_PU", "SEX", "ESR", "LANX", "MAR", "DIS", "NP", "TEN", "Boro", "Povunit_Rel", "FamType_PU", "HousingStatus", "Ethnicity", "EducAttain", "CitizenStatus", "AgeCateg", "FTPTWork", "NYCgov_Pov_Stat")
+labels2 <- c("Income", "Sex", "Employment", "Language", "Marital Status", "Disability", "Unit Population", "Housing Tenure", "Borough", "Unit Relationship", "Family Type", "Housing Type", "Ethnicity", "Educational Attainment", "Citizenship Status", "Age Category", "Work Experience", "Poverty Status (NYC)")
+dfn <- data.frame(sapply( df[, keep2], as.numeric ))
+Acor <- cor(dfn)
+plot_ly(x = labels2, y = labels2, z = Acor, type = "heatmap", width = 700, height = 600) %>%
+  layout(title = "Correlation Matrix",
+         font = t,
+         margin = list(t = 30))
+```
+
+Using leaps we can identify important variables that may factor strongly into a generalized linear model (GLM) with logistic regression. Leaps performs an exhaustive search for the best subsets of the variables in x for predicting y in linear regression, using an efficient branch-and-bound algorithm. Logistic regression may fit more closely if poverty is treated as a binary condition. For simplification of the model and identifying risk factors associated with poverty this may be appropriate.
+
+```{r, message = FALSE}
+reg.seqrep <- regsubsets(NYCgov_Pov_Stat~., data = dfn, nvmax = 10, nbest = 1, method = "forward")
+labels3 <- c("(Intercept)", "Income", "Sex", "Employment", "Language", "Marital Status", "Disability", "Unit Population", "Housing Tenure", "Borough", "Unit Relationship", "Family Type", "Housing Type", "Ethnicity", "Educational Attainment", "Citizenship Status", "Age Category", "Work Experience")
+plot(reg.seqrep, scale = "Cp", main = "Cp", col = "dodgerblue4", labels = labels3)
+```
+
+That said, based on the fact that we have many variables and many of those variables are actually categorical, we will opt to use Random Forest (RF) for feature selection in order to rank our data based on variable importance. While income is the most obvious factor, other important factors include family unit population/type, housing circumstances and location, education and work experience. With housing in particular, affordability is a major issue with the average monthly rent for NYC apartments now over $3,600 and low-income workers are disproportionately impacted by these issues (Lorin, 2018).
+
+```{r}
+keep3 <- c("PreTaxIncome_PU", "SEX", "ESR", "LANX", "MAR", "DIS", "NP", "TEN", "Boro", "Povunit_Rel", "FamType_PU", "HousingStatus", "Ethnicity", "EducAttain", "CitizenStatus", "AgeCateg", "FTPTWork", "NYCgov_Pov_Stat")
+dtf <- data.frame(sapply( df[, keep3], as.factor ))
+dtf$PreTaxIncome_PU <- as.integer(dtf$PreTaxIncome_PU)
+fit_rf <- randomForest(NYCgov_Pov_Stat ~., data = dtf, ntree = 200, importance = TRUE) #fit all data to RF model
+importance <- importance(fit_rf) #calculate importance table
+varImportance <- data.frame(Variables = row.names(importance),
+                            Importance = round(importance[, "MeanDecreaseGini"], 2))
+
+varImportance$Variables <- c("Income", "Sex", "Employment", "Language", "Marital Status", "Disability", "Unit Population", "Housing Tenure", "Borough", "Unit Relationship", "Family Type", "Housing Type", "Ethnicity", "Educational Attainment", "Citizenship Status", "Age Category", "Work Experience")
+varImportance <- varImportance[order(-varImportance$Importance), ]
+plot_ly(varImportance,
+        x = ~Importance,
+        y = ~reorder(Variables, Importance),
+        name = "Importance of variables",
+        type = "bar",
+        orientation = "h",
+        marker = list(color = "rgba(55, 100, 158, 0.6)",
+                      line = list(color = "rgba(55, 100, 158, 1.0)", width = 1)),
+            width = 750,
+            height = 500) %>%
+  layout(title = "<b>Rank of Factors Based on Importance in Random Forest Model</b>",
+         yaxis = list(title = "", showgrid = TRUE, showline = FALSE, showticklabels = TRUE, domain = c(0, 1)),
+         xaxis = list(title = "Importance", zeroline = FALSE, showline = FALSE, showticklabels = TRUE, showgrid = TRUE),
+         font = t,
+         margin = list(t = 30)) %>%
+  add_annotations(xref = "x1", yref = "y",
+                  x = ~Importance * .5,
+                  text = ~round(Importance, 0),
+                  font = list(family = "Arial", size = 12, color = "white"),
+                  showarrow = FALSE)
+```
+
+Based on our RF model, we confirmed that <b>`r format(varImportance[1, 1])`</b> was the most important variable with a value of <b>`r format(varImportance[1, 2])`</b>, followed by <b>`r format(varImportance[2, 1])`</b>, <b>`r format(varImportance[3, 1])`</b>, <b>`r format(varImportance[4, 1])`</b> and <b>`r format(varImportance[5, 1])`</b>. we used Gini Importance or Mean Decrease in Impurity (MDI) to calculate importance of variables MDI calculates each feature importance as the sum over the number of splits that include the feature, proportionally to the number of samples it splits (Lee, 2017).
+
+Ultimately, we determined in both our techniques that income has the strongest predictive power for poverty status, but may not tell us much from a poverty risk factor standpoint. Since knowing the pretax income can pretty much determine the poverty status and is used by NYC to make poverty determination, we might want to know how well the model would fit if we omit the PreTaxIncome variable. That said, for the purpose of this study and to evaluate our modeling techniques, we opted to keep income in, as while it is a strong component of poverty, it is not the sole factor.
+
+```{r, echo = F, warning = FALSE, message = FALSE}
+keep4 <- c("PreTaxIncome_PU", "SEX", "ESR", "LANX", "MAR", "DIS", "NP", "TEN", "Boro", "Povunit_Rel", "FamType_PU", "HousingStatus", "Ethnicity", "EducAttain", "CitizenStatus", "AgeCateg", "FTPTWork", "NYCgov_Pov_Stat")
+dtf <- data.frame(sapply( df[, keep4], as.factor ))
+dtf$PreTaxIncome_PU <- as.integer(dtf$PreTaxIncome_PU)
+th <- .25 #set threshold for probabilities used for poverty determination
+#creating indices
+set.seed(123)
+train_index <- createDataPartition(dtf$NYCgov_Pov_Stat, p = 0.70, list = FALSE)
+#splitting data into training/testing data using the train_index object
+pov_train <- dtf[train_index, ] #training data (70% of data)
+pov_test <- dtf[-train_index, ] #testing data (30% of data)
+#train GLM model
+aLogit1 <- glm(NYCgov_Pov_Stat ~., data = pov_train, family = "binomial")
+options(warning = F)
+pred1 <- predict(aLogit1, newdata = pov_test, type = c("response"))
+options(warning = T)
+pov_test$pred1n <- pred1
+pred1[pred1 >= th] <- 1 #if predict poverty is > 25% then change from 0 to 1
+pred1[pred1 < th] <- 0 #if predict poverty is < 25% then change from 0 to 1
+pov_test$pred1 <- as.factor(pred1)
+pov_test$NYCgov_Pov_Stat <- factor(pov_test$NYCgov_Pov_Stat)
+c1 <- confusionMatrix(pov_test$pred1, pov_test$NYCgov_Pov_Stat)
+h1 <- roc(NYCgov_Pov_Stat~pred1n, data = pov_test)
+#train RF model
+pov_test$pred1 <- NULL
+pov_test$pred1n <- NULL
+fit_rf1 <- randomForest(NYCgov_Pov_Stat ~., data = pov_train, ntree = 200, importance = TRUE)
+pred2 <- predict(fit_rf1, newdata = pov_test, type = "prob")
+pov_test$pred2n <- pred2[, 2]
+pred2 <- pred2[, 2]
+pred2[pred2 >= th] <- 1 #if predict poverty is > 25% then change from 0 to 1
+pred2[pred2 < th] <- 0 #if predict poverty is < 25% then change from 0 to 1
+pov_test$pred2 <- as.factor(pred2)
+c2 <- confusionMatrix(pov_test$pred2, pov_test$NYCgov_Pov_Stat)
+h2 <- roc(NYCgov_Pov_Stat~pred2n, data = pov_test)
+```
+
+In conclusion, we will try to fit the model using random forest to see if we can improve the accuracy score from our GLM which had an area under curve (AUC) score of <b>`r format(round(auc(h1), 2))`</b> and accuracy score of <b>`r format(100 * round(c1$overall[1], 2))`%</b>. Random forest appears to be a better model in this instance with an AUC score of <b>`r format(round(auc(h2), 2))`</b> and accuracy score of <b>`r format(100 * round(c2$overall[1], 2))`%</b>. That said, we will conduct additional assessments of the two models in the following section.
+
+## 6.3 Assessing the Model
+
+#### Area-Under-Curve (AUC) of the Receiver-Operating-Characteristic (ROC) curve.
+Receiver operating characteristic curve, gives the diagnostic ability of a binary classifier system as its discrimination threshold is varied. The curve is on sensitivity/recall/true-positive-rate vs false_alarm/false-positive-rate/fall-out. Area Under Curve is a byproduct of ROC to measure discrimination and is used to accept/decline model. Below is a modified visualization of both models side by side.
+
+```{r, message = FALSE}
+auc1 <- auc(h1) # area-under-curve prefer 0.8 or higher.
+data1 <- data.frame(h1$sensitivities, h1$specificities)
+colnames(data1) <- c("Sensitivity", "Specificity")
+pc1 <- plot_ly(data1, x = ~Specificity, y = ~Sensitivity, width = 950, height = 400) %>%
+  add_lines(name = "Model",
+            line = list(shape = "spline", color = "#737373", width = 7),
+            fill = "tozeroy", fillcolor = "#2A3356") %>%
+  add_segments(x = 0, y = 1, xend = 1, yend = 0,
+               line = list(dash = "7px", color = "#F35B25", width = 4),
+               name = "Random") %>%
+  add_segments(x = 1, y = 0, xend = 1, yend = 1,
+               line = list(dash = "10px", color = "black", width = 4),
+               showlegend = F) %>%
+  add_segments(x = 0, y = 1, xend = 1, yend = 1,
+               line = list(dash = "10px", color = "black", width = 4),
+               showlegend = F) %>%
+  add_annotations(x = 0.6, y = 0.3, showarrow = F,
+                  text = paste0("AUC for GLM: ", round(auc1, 2)),
+                  xref = "x1",
+                  yref = "y1",
+                  font = list(family = "serif", size = 14, color = "#E8E2E2")) %>%
+  layout(xaxis = list(range = c(1.1, -0.1)),
+         yaxis = list(range = c(-0.1, 1.1)),
+         plot_bgcolor = "#E8E2E2",
+         title = "Area Under Curve (AUC) for Poverty Model",
+         font = t,
+         margin = list(t = 30))
+
+auc2 <- auc(h2) # area-under-curve prefer 0.8 or higher.
+data2 <- data.frame(h2$sensitivities, h2$specificities)
+colnames(data2) <- c("Sensitivity", "Specificity")
+pc2 <- plot_ly(data2, x = ~Specificity, y = ~Sensitivity, width = 950, height = 400) %>%
+  add_lines(name = "Model",
+            line = list(shape = "spline", color = "#737373", width = 7),
+            fill = "tozeroy", fillcolor = "#2A3356") %>%
+  add_segments(x = 0, y = 1, xend = 1, yend = 0,
+               line = list(dash = "7px", color = "#F35B25", width = 4),
+               name = "Random") %>%
+  add_segments(x = 1, y = 0, xend = 1, yend = 1,
+               line = list(dash = "10px", color = "black", width = 4),
+               showlegend = F) %>%
+  add_segments(x = 0, y = 1, xend = 1, yend = 1,
+               line = list(dash = "10px", color = "black", width = 4),
+               showlegend = F) %>%
+  add_annotations(x = -.4, y = 0.3, showarrow = F,
+                  text = paste0("AUC for RF: ", round(auc2, 2)),
+                  xref = "x2",
+                  yref = "y2",
+                  font = list(family = "serif", size = 14, color = "#E8E2E2")) %>%
+  layout(xaxis = list(range = c(1.1, -0.1)),
+         yaxis = list(title = "", range = c(-0.1, 1.1), showticklabels = FALSE),
+         plot_bgcolor = "#E8E2E2",
+         title = "<b>Area Under Curve (AUC) for Poverty Model:</b><br>General Linear Model vs. Random Forest",
+         font = t,
+         margin = list(t = 65))
+subplot(pc1, pc2, titleX = T, titleY = T)
+```
+As stated earlier our GLM had an area under curve (AUC) score of <b>`r format(round(auc(h1), 2))`</b> and our random forest model appears to be a better model in this instance with an AUC score of <b>`r format(round(auc(h2), 2))`</b>. That said our next step is to determine how effective our models are for specific conditions.
+
+#### Confusion Matrix
+Another important tool for analyzing the performance of a classifier for two or more classes is the confusion matrix. The confusion matrix shows for each pair of classes how many observations were correctly or incorrectly assigned. While we were able to find overall accuracy scores of <b>`r format(100 * round(c1$overall[1], 2))`%</b> for our GLM and <b>`r format(100 * round(c2$overall[1], 2))`%</b> for our RF, we want to know how well our model performs at identifying poverty specifically versus non-poverty, and where our false positives and false negatives are. For our study, we will re-sample our test data so we get equal parts poverty and non-poverty observations to see where our models do well. In addition, after experimentation, we used a probability threshold of <b>`r format(th)`</b> to improve recognition of poverty, at the expense of accuracy against non-poverty.
+
+```{r, message = FALSE}
+pov_test$pred1 <- as.factor(pred1)
+pov_test1 <- pov_test[as.integer(as.character(pov_test$NYCgov_Pov_Stat)) == 1, ]
+pov_test0 <- pov_test[as.integer(as.character(pov_test$NYCgov_Pov_Stat)) == 0, ]
+pov_testb <- rbind(pov_test0[sample(nrow(pov_test0), 2000), ], pov_test1[sample(nrow(pov_test1), 2000), ])
+
+
+c1 <- confusionMatrix(pov_testb$pred1, pov_testb$NYCgov_Pov_Stat)
+tt <- c1$table[2, 2]
+tf <- c1$table[2, 1]
+ft <- c1$table[1, 2]
+ff <- c1$table[1, 1]
+ttp <- round(tt / sum(c1$table) * 200, 1)
+tfp <- round(tf / sum(c1$table) * 200, 1)
+ftp <- round(ft / sum(c1$table) * 200, 1)
+ffp <- round(ff / sum(c1$table) * 200, 1)
+
+p1 <- plot_ly(y = c("poverty", "non-poverty"), x = c("poverty", "non-poverty"), z = matrix(c(ttp, tfp, ftp, ffp), nrow = 2, ncol = 2), colors = "Blues", type = "heatmap", width = 800, height = 500) %>%
+  colorbar(title = "Pct.") %>%
+  layout(title = "<b>Confusion Matrix</b>",
+         xaxis = list(title = "Predicted value"),
+         yaxis = list(title = "Real value"),
+         font = t,
+         margin = list(t = 30),
+         annotations = list(
+          list(
+            x = "poverty",
+            y = "poverty",
+            font = list(color = "black"),
+            showarrow = FALSE,
+            text = paste0("<b>", tt, "<br>", ttp, "%</b>"),
+            xref = "x1",
+            yref = "y1"
+          ),
+          list(
+            x = "poverty",
+            y = "non-poverty",
+            font = list(color = "black"),
+            showarrow = FALSE,
+            text = paste0("<b>", tf, "<br>", tfp, "%</b>"),
+            xref = "x1",
+            yref = "y1"
+          ),
+          list(
+            x = "non-poverty",
+            y = "poverty",
+            font = list(color = "black"),
+            showarrow = FALSE,
+            text = paste0("<b>", ft, "<br>", ftp, "%</b>"),
+            xref = "x1",
+            yref = "y1"
+          ),
+          list(
+            x = "non-poverty",
+            y = "non-poverty",
+            font = list(color = "white"),
+            showarrow = FALSE,
+            text = paste0("<b>", ff, "<br>", ffp, "%</b>"),
+            xref = "x1",
+            yref = "y1"
+          )))
+
+c2 <- confusionMatrix(pov_testb$pred2, pov_testb$NYCgov_Pov_Stat)
+tt <- c2$table[2, 2]
+tf <- c2$table[2, 1]
+ft <- c2$table[1, 2]
+ff <- c2$table[1, 1]
+ttp <- round(tt / sum(c2$table) * 200, 1)
+tfp <- round(tf / sum(c2$table) * 200, 1)
+ftp <- round(ft / sum(c2$table) * 200, 1)
+ffp <- round(ff / sum(c2$table) * 200, 1)
+
+p2 <- plot_ly(y = c("poverty", "non-poverty"),
+              x = c("poverty", "non-poverty"),
+              z = matrix(c(ttp, tfp, ftp, ffp), nrow = 2, ncol = 2),
+              colors = "Blues",
+              type = "heatmap",
+              width = 800,
+              height = 500) %>%
+  colorbar(title = "Pct.") %>%
+  layout(title = "<b>Confusion Matrix:</b><br>General Linear Model vs. Random Forest",
+         xaxis = list(title = "Predicted value"),
+         yaxis = list(title = "", showticklabels = FALSE),
+         font = t,
+         margin = list(t = 65),
+         annotations = list(
+          list(
+            x = "poverty",
+            y = "poverty",
+            font = list(color = "white"),
+            showarrow = FALSE,
+            text = paste0("<b>", tt, "<br>", ttp, "%</b>"),
+            xref = "x2",
+            yref = "y2"
+          ),
+          list(
+            x = "poverty",
+            y = "non-poverty",
+            font = list(color = "black"),
+            showarrow = FALSE,
+            text = paste0("<b>", tf, "<br>", tfp, "%</b>"),
+            xref = "x2",
+            yref = "y2"
+          ),
+          list(
+            x = "non-poverty",
+            y = "poverty",
+            font = list(color = "black"),
+            showarrow = FALSE,
+            text = paste0("<b>", ft, "<br>", ftp, "%</b>"),
+            xref = "x2",
+            yref = "y2"
+          ),
+          list(
+            x = "non-poverty",
+            y = "non-poverty",
+            font = list(color = "white"),
+            showarrow = FALSE,
+            text = paste0("<b>", ff, "<br>", ffp, "%</b>"),
+            xref = "x2",
+            yref = "y2"
+          )))
+subplot(p1, p2, titleX = T, titleY = T)
+```
+Looking at the above confusion matrices, we observe improved accuracy scores of <b>`r format(round(ttp, 2))`%</b> for poverty and <b>`r format(round(ffp, 2))`%</b> for non-poverty for our RF. Ultimately these numbers are significantly lower without income but still useful for understanding some of the factors.
+
+# Chapter 7: Conclusion
+
+In conclusion, poverty is an important area of ongoing study, particularly from a data science perspective. Poverty is caused by many economic and social issues and leads to many negative effects that impact health and quality of life. There are many factors that influence the chances an individual may experience poverty conditions in their lifetime. Poverty effects many communities and groups differently and links to education, location, work experience, ethnicity, family size and many other factors beyond those we were able to study in this data set. In addition, the relationship with poverty and many factors like education/housing are cyclical meaning they influence each other. While the scale of poverty makes it a challenge to address, data science can help decision makers better understand this ongoing problem to break the cycles of poverty by helping to prioritize and target interventions for the most at-risk groups.
+
+# Bibliography
+
+Abadi Mark. (2018). "Income inequality is growing across the USA: here's how bad it is in every state" Business Insider. https://www.businessinsider.com/income-inequality-in-us-states-ranked-2018-3
+
+Ferguson, H., Bovaird, S., & Mueller, M. (2007, October 12). The impact of poverty on educational outcomes for children. Retrieved December 3, 2018, from https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2528798/
+
+Fontenot, K., Semega, J., & Kollar, M. (2018). "Income and Poverty in the United States: 2017". Current Population Reports, P60-263. https://www.census.gov/library/publications/2018/demo/p60-263.html
+
+FPI. (2016, June 17). New York State Leads Nation in Income Inequality. Retrieved December 3, 2018, from http://fiscalpolicy.org/nys-leads-nation-in-income-inequality
+
+Lee, C. (2017, October 28). Feature Importance Measures for Tree Models - Part I. Retrieved December 3, 2018, from https://medium.com/the-artificial-impostor/feature-importance-measures-for-tree-models-part-i-47f187c1a2c3
+
+Lorin, E. (2018, September 07). Endowments, Foundations Can Grow Local Economies, Reduce Poverty With Affordable Housing Initiatives. Retrieved December 3, 2018, from https://www.forbes.com/sites/forbesrealestatecouncil/2018/09/07/endowments-foundations-can-grow-local-economies-reduce-poverty-with-affordable-housing-initiatives
+
+NYC.gov. (2016). "NYC opportunity's poverty research 2016". Data retrieved from: https://data.cityofnewyork.us/City-Government/NYCgov-Poverty-Measure-Data-2016-/y9gu-cxxw
+
+Patten, E. (2016, July 01). Racial, gender wage gaps persist in U.S. despite some progress. Retrieved December 3, 2018, from http://www.pewresearch.org/fact-tank/2016/07/01/racial-gender-wage-gaps-persist-in-u-s-despite-some-progress/
+
+Reeves, R. V. (2016, July 28). Two anti-poverty strategies. Retrieved December 5, 2018, from https://www.brookings.edu/opinions/two-anti-poverty-strategies/
